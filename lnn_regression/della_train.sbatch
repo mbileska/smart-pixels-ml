@@ -5,7 +5,6 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=72:00:00
-#SBATCH --partition=gpu
 #SBATCH --gres=gpu:1
 set -euo pipefail
 module load anaconda3/2026.7

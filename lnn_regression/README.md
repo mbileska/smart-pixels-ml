@@ -75,7 +75,8 @@ git clone git@github.com:ligerlac/torchlogix.git "$DATA/torchlogix"
 git -C "$DATA/torchlogix" checkout abdf71681a3d2b91ea05c145aa8a0056f68d87f5
 python -m pip install --no-deps -e "$DATA/torchlogix"
 python -c 'import torch, torchlogix; print(torch.__version__, torch.cuda.is_available())'
-sbatch lnn_regression/della_prepare.sbatch
+PREP_JOB=$(sbatch --parsable lnn_regression/della_prepare.sbatch)
+echo "Preparation job: $PREP_JOB"
 ```
 
 If `~/smart-pixels-ml` is already cloned, use `cd ~/smart-pixels-ml`,
@@ -87,16 +88,20 @@ to finish (`squeue -u "$USER"`). It creates
 `$DATA/prepared/2frame_2bit/metadata.json` and `train`, `val`, `test` shards.
 Review the event counts and label scale in that metadata before training.
 
-Run an initial MLP Slim model:
+Run an initial MLP Slim model. If you started a new shell, set `PREP_JOB` to the
+preparation job ID printed above. The dependency makes training wait for
+successful preparation.
 
 ```bash
 cd ~/smart-pixels-ml
-sbatch --export=ALL,ARCH=mlp,TASK=slim lnn_regression/della_train.sbatch
+sbatch --dependency=afterok:"$PREP_JOB" --export=ALL,ARCH=mlp,TASK=slim lnn_regression/della_train.sbatch
 ```
 
 The training job saves `latest.pt` every epoch, selects `best.pt` by validation
 loss, then writes `test/metrics.json`, `test/predictions.parquet`,
 `test/residuals.png`, `test/history.png`, and for Full/Max `test/pulls.png`.
+The job requests one GPU with `--gres=gpu:1`; Della assigns the public GPU
+partition, so the script does not name a partition.
 If the 72-hour job ends before 1000 epochs, submit the same command again; it
 automatically resumes. Once the job finishes successfully, train the paper's
 seven architecture/output combinations:
@@ -106,7 +111,7 @@ cd ~/smart-pixels-ml
 for spec in mlp:slim mlp:full conv1d:slim conv1d:full conv2d:slim conv2d:full conv2d:max; do
   ARCH=${spec%:*}
   TASK=${spec#*:}
-  sbatch --export=ALL,ARCH="$ARCH",TASK="$TASK" lnn_regression/della_train.sbatch
+  sbatch --dependency=afterok:"$PREP_JOB" --export=ALL,ARCH="$ARCH",TASK="$TASK" lnn_regression/della_train.sbatch
 done
 ```
 
