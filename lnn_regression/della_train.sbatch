@@ -22,3 +22,4 @@ python -m lnn_regression.run train --data "$DATA/prepared/2frame_2bit" \
   --out "$RUN" --architecture "$ARCH" --task "$TASK" --epochs 1000 --batch-size 5000 "${RESUME[@]}"
 python -m lnn_regression.run evaluate --data "$DATA/prepared/2frame_2bit" \
   --checkpoint "$RUN/best.pt" --out "$RUN/test" --split test
+python -m lnn_regression.export --checkpoint "$RUN/best.pt" --out "$RUN/export"

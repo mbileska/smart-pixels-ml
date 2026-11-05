@@ -41,8 +41,10 @@ Conv2D variants. The learned layers are `LogicDense` and `LogicConv2d` gates
 from TorchLogix. A 2-bit ADC value is encoded as three cumulative comparator
 bits. Projection and spatial pooling use Boolean OR, the logic equivalent of
 max pooling; the paper uses charge averages. Binary fan-in requires extra gate
-reduction stages before the 16-node blocks. The output uses binary gate counts
-(`GroupSum`) and a fixed numeric mapping for means, widths, and covariance.
+reduction stages before the 16-node blocks. Each output feature has an
+independent `GroupSum(k=1)` over its binary gates. Its `tau` and `beta` encode
+the fixed numeric mapping for means, widths, and covariance directly in the
+TorchLogix circuit representation.
 The loss and reporting arithmetic are used during training and evaluation; there
 are no learned floating-point layers in the deployed model. Hard LUTs are used
 for validation and test predictions. This is an LNN comparison with the paper,
@@ -98,7 +100,9 @@ sbatch --export=ALL,ARCH=mlp,TASK=slim lnn_regression/della_train.sbatch
 
 The training job saves `latest.pt` every epoch, selects `best.pt` by validation
 loss, then writes `test/metrics.json`, `test/predictions.parquet`,
-`test/residuals.png`, `test/history.png`, and for Full/Max `test/pulls.png`.
+`test/residuals.png`, `test/history.png`, and for Full/Max `test/pulls.png`. It
+also exports the binary-input gate core to `export/circuit.json` and
+`export/circuit.c`, with per-feature readout settings in `export/readout.json`.
 The job requests one GPU with `--gres=gpu:1`; Della assigns the public GPU
 partition, so the script does not name a partition.
 If the 72-hour job ends before 1000 epochs, submit the same command again; it
@@ -120,6 +124,30 @@ fewer jobs at a time. For an optional 20-frame, 2-bit study, run the converter
 with `--frames 20 --out "$DATA/prepared/20frame_2bit"`, then point `--data` at
 that directory in a direct `python -m lnn_regression.run train ...` invocation.
 This is *not* the paper's 20-frame electron-precision study.
+
+### Jobs started before the per-feature GroupSum update
+
+Checkpoints produced by the earlier readout are compatible and do not need
+retraining. The old model computed the same count-to-value mapping after one
+multi-output `GroupSum`; the updated model stores that mapping in one
+`GroupSum(k=1)` per feature so `tau` and `beta` survive circuit lowering.
+After all jobs using the old checkout finish, pull the latest `wip-mila` and
+export every completed run:
+
+```bash
+cd ~/smart-pixels-ml
+git pull --ff-only origin wip-mila
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+for run in "$DATA"/runs/*_*; do
+  [[ -f "$run/best.pt" ]] || continue
+  python -m lnn_regression.export --checkpoint "$run/best.pt" --out "$run/export"
+done
+```
+
+The C and JSON circuit exports retain `tau` and `beta`. The pinned TorchLogix
+Verilog writer currently emits raw reduction counts for nonconstant sums, so
+use the C/JSON artifacts for calibrated regression outputs until that writer
+supports scaled reductions.
 
 After the runs finish, make a paper-style residual summary:
 

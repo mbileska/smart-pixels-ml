@@ -21,6 +21,21 @@ def reduce_gates(input_width, output_width, device):
     return nn.Sequential(*layers)
 
 
+class CircuitReadout(nn.Module):
+    """Binary-input gate core for TorchLogix Circuit export.
+
+    The fixed ADC comparator encoding is upstream of this module. Its outputs
+    are the normalized regression parameters, with tau/beta in GroupSum nodes.
+    """
+
+    def __init__(self, regressor):
+        super().__init__()
+        self.regressor = regressor
+
+    def forward(self, bits):
+        return self.regressor.forward_logic(bits)
+
+
 class LogicRegressor(nn.Module):
     """Paper-shaped MLP, Conv1D and Conv2D alternatives using Boolean gates.
 
@@ -38,6 +53,8 @@ class LogicRegressor(nn.Module):
         if task == "max" and architecture != "conv2d":
             raise ValueError("The paper uses Max only with Conv2D")
         self.architecture, self.task, self.frames = architecture, task, frames
+        if readout_bits < 1:
+            raise ValueError("readout_bits must be positive")
         self.readout_bits = readout_bits
         n_raw = {"slim": 3, "full": 8, "max": 14}[task]
         gate = lambda a, b: LogicDense(a, b, device=device,
@@ -76,16 +93,34 @@ class LogicRegressor(nn.Module):
         self.output_gates = LogicDense(head_in, n_raw * readout_bits, device=device,
                                        parametrization_kwargs={"forward_sampling": "hard",
                                                                "weight_init": "random"})
-        self.counter = GroupSum(k=n_raw, tau=readout_bits)
+        # One independent sum per physical output. GroupSum owns the scale and
+        # offset so TorchLogix preserves them in Circuit sum_nodes and C code.
+        mean_count = 3 if task == "slim" else 4
+        readout_specs = ([(readout_bits / 4, -readout_bits / 2)] * mean_count)
+        if task != "slim":
+            readout_specs += [(readout_bits / 2, 0.01 * readout_bits)] * 4
+        if task == "max":
+            readout_specs += [(readout_bits / 2, -readout_bits / 2)] * 6
+        self.readouts = nn.ModuleList(
+            GroupSum(k=1, tau=tau, beta=beta, device=device)
+            for tau, beta in readout_specs
+        )
 
-    def forward(self, codes):
-        assert codes.ndim == 4 and codes.shape[1:] == (self.frames, 16, 16)
-        steps = torch.arange(1, 4, device=codes.device).view(1, 1, 3, 1, 1)
-        bits = (codes.unsqueeze(2) >= steps).float().flatten(1, 2)
+    def forward_logic(self, bits):
+        """Evaluate gate network on thermometer-encoded binary ADC inputs."""
+        assert bits.ndim == 4 and bits.shape[1:] == (3 * self.frames, 16, 16)
         if self.architecture in ("mlp", "conv1d"):
             # Boolean projection counterpart of the paper's charge average pooling.
-            proj_x = bits.amax(dim=3).flatten(1)
-            proj_y = bits.amax(dim=2).flatten(1)
+            if bits.dtype == torch.bool:
+                proj_x = bits[:, :, :, 0]
+                proj_y = bits[:, :, 0, :]
+                for i in range(1, 16):
+                    proj_x = proj_x | bits[:, :, :, i]
+                    proj_y = proj_y | bits[:, :, i, :]
+            else:
+                proj_x = bits.amax(dim=3)
+                proj_y = bits.amax(dim=2)
+            proj_x, proj_y = proj_x.flatten(1), proj_y.flatten(1)
             if self.architecture == "mlp":
                 x = self.proj_x(proj_x)
                 y = self.proj_y(proj_y)
@@ -97,16 +132,26 @@ class LogicRegressor(nn.Module):
         else:
             z = self.pool(self.conv_pointwise(self.conv_spatial(bits))).flatten(1)
         z = self.hidden2(self.hidden1(z))
-        raw = self.counter(self.output_gates(z))
+        gates = self.output_gates(z)
+        return torch.cat([
+            readout(gates[:, i * self.readout_bits:(i + 1) * self.readout_bits])
+            for i, readout in enumerate(self.readouts)
+        ], dim=1)
+
+    def forward(self, codes):
+        assert codes.ndim == 4 and codes.shape[1:] == (self.frames, 16, 16)
+        steps = torch.arange(1, 4, device=codes.device).view(1, 1, 3, 1, 1)
+        bits = (codes.unsqueeze(2) >= steps).float().flatten(1, 2)
+        raw = self.forward_logic(bits)
         n_mean = 3 if self.task == "slim" else 4
-        means = 4.0 * (raw[:, :n_mean] - 0.5)
+        means = raw[:, :n_mean]
         if self.task == "slim":
             return {"mean": means}
         # Positive widths and Cholesky diagonal; units are normalized truth units.
-        sigma = 0.02 + 2.0 * raw[:, n_mean:2 * n_mean]
+        sigma = raw[:, n_mean:2 * n_mean]
         if self.task == "full":
             return {"mean": means, "sigma": sigma}
-        lower = 2.0 * (raw[:, 8:] - 0.5)
+        lower = raw[:, 8:]
         tril = torch.diag_embed(sigma)
         tril[:, 1, 0] = lower[:, 0]
         tril[:, 2, 0] = lower[:, 1]
