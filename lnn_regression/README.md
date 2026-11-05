@@ -84,17 +84,16 @@ If `~/smart-pixels-ml` is already cloned, use `cd ~/smart-pixels-ml`,
 
 The current TorchLogix `main` checkout uses Python 3.12 syntax. Submit the
 preparation job from the repository root after the checksums pass. Wait for it
-to finish (`squeue -u "$USER"`). It creates
+to finish and confirm `COMPLETED` with exit code `0:0` using
+`sacct -j "$PREP_JOB" --format=JobID,State,ExitCode`. It creates
 `$DATA/prepared/2frame_2bit/metadata.json` and `train`, `val`, `test` shards.
 Review the event counts and label scale in that metadata before training.
 
-Run an initial MLP Slim model. If you started a new shell, set `PREP_JOB` to the
-preparation job ID printed above. The dependency makes training wait for
-successful preparation.
+Run an initial MLP Slim model after preparation succeeds:
 
 ```bash
 cd ~/smart-pixels-ml
-sbatch --dependency=afterok:"$PREP_JOB" --export=ALL,ARCH=mlp,TASK=slim lnn_regression/della_train.sbatch
+sbatch --export=ALL,ARCH=mlp,TASK=slim lnn_regression/della_train.sbatch
 ```
 
 The training job saves `latest.pt` every epoch, selects `best.pt` by validation
@@ -111,7 +110,7 @@ cd ~/smart-pixels-ml
 for spec in mlp:slim mlp:full conv1d:slim conv1d:full conv2d:slim conv2d:full conv2d:max; do
   ARCH=${spec%:*}
   TASK=${spec#*:}
-  sbatch --dependency=afterok:"$PREP_JOB" --export=ALL,ARCH="$ARCH",TASK="$TASK" lnn_regression/della_train.sbatch
+  sbatch --export=ALL,ARCH="$ARCH",TASK="$TASK" lnn_regression/della_train.sbatch
 done
 ```
 
