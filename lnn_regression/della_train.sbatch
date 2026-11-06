@@ -15,7 +15,7 @@ mkdir -p "$MPLCONFIGDIR"
 DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
 ARCH=${ARCH:-mlp}
 TASK=${TASK:-slim}
-RUN="$DATA/runs/${ARCH}_${TASK}"
+RUN="$DATA/runs_centered/${ARCH}_${TASK}"
 RESUME=()
 if [[ -f "$RUN/latest.pt" ]]; then RESUME=(--resume); fi
 python -m lnn_regression.run train --data "$DATA/prepared/2frame_2bit" \

@@ -19,3 +19,5 @@ python -m lnn_regression.data \
   --train-source "$DATA/raw/dataset_3sExtended_16x16_50x12P5x100" \
   --test-source "$DATA/raw/dataset_2s_16x16_50x12P5x100" \
   --out "$DATA/prepared/2frame_2bit"
+python -m lnn_regression.calibrate --data "$DATA/prepared/2frame_2bit" \
+  --target-span 1 --margin 0.1 --readout-bits 64

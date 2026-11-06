@@ -15,9 +15,12 @@ at the sensor edge*](https://arxiv.org/abs/2602.15946v4). The public input is
   0, 1, 2, 3. Default thresholds are the transformer's published means:
   247.8, 668.4, 1662.9 electrons. Change with `--thresholds` if the exact
   model-specific thresholds become available.
-- Inputs remain in charge-bin units; labels are x-midplane, y-midplane,
-  cotAlpha, cotBeta divided by the maximum per-file 99th percentile absolute
-  values from training data. No input standardization or log transform.
+- Inputs remain in charge-bin units. A separate calibration pass subtracts the
+  **training mean** from each label and divides by its maximum absolute
+  training deviation, putting every training label within [-1, 1]. The
+  converter also records the reference checkout's per-file 99th-percentile
+  scale in `metadata.json`; this LNN training uses `calibration.json` instead.
+  No input standardization or log transform is applied.
 - 80/20 train/validation split from the extended angular sample and a separate
   physical-pT `2s` test sample. Adam with Nesterov momentum (`torch.optim.NAdam`),
   learning rate 0.001, batch size 5000, 1000 epochs, and best hard-LUT validation
@@ -42,9 +45,13 @@ from TorchLogix. A 2-bit ADC value is encoded as three cumulative comparator
 bits. Projection and spatial pooling use Boolean OR, the logic equivalent of
 max pooling; the paper uses charge averages. Binary fan-in requires extra gate
 reduction stages before the 16-node blocks. Each output feature has an
-independent `GroupSum(k=1)` over its binary gates. Its `tau` and `beta` encode
-the fixed numeric mapping for means, widths, and covariance directly in the
-TorchLogix circuit representation.
+independent `GroupSum(k=1)` over its binary gates. Each mean head receives its
+own `tau` and `beta`, fitted from the training feature's centered range with
+10% headroom on both ends and at least 10% beyond [-1, 1]. The output is
+`(count + beta) / tau`, with `tau = readout_bits / (upper - lower)` and
+`beta = lower * tau`. Separate positive intervals are used for uncertainty
+heads and signed intervals for Max covariance heads. These values are stored
+directly in the TorchLogix circuit representation.
 The loss and reporting arithmetic are used during training and evaluation; there
 are no learned floating-point layers in the deployed model. Hard LUTs are used
 for validation and test predictions. This is an LNN comparison with the paper,
@@ -89,7 +96,25 @@ preparation job from the repository root after the checksums pass. Wait for it
 to finish and confirm `COMPLETED` with exit code `0:0` using
 `sacct -j "$PREP_JOB" --format=JobID,State,ExitCode`. It creates
 `$DATA/prepared/2frame_2bit/metadata.json` and `train`, `val`, `test` shards.
-Review the event counts and label scale in that metadata before training.
+Review event counts in that metadata and the newly produced
+`calibration.json` and `label_normalization.png`. If preparation was already
+completed before this update, run calibration directly on the existing shards;
+there is no need to download or convert them again:
+
+```bash
+cd ~/smart-pixels-ml
+git pull --ff-only origin wip-mila
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+python -m lnn_regression.calibrate --data "$DATA/prepared/2frame_2bit" \
+  --target-span 1 --margin 0.1 --readout-bits 64
+```
+
+The command prints the fitted range, `tau`, `beta`, and original-unit step for
+each mean output, plus counts of validation/test labels outside the available
+range. Training ranges use only training labels; if either held-out split has
+out-of-range values, increase `--margin`, inspect the new plot and calibration
+report, and retrain from a fresh output directory. A finite training sample
+cannot prove a bound for every possible future event.
 
 Run an initial MLP Slim model after preparation succeeds:
 
@@ -98,7 +123,22 @@ cd ~/smart-pixels-ml
 sbatch --export=ALL,ARCH=mlp,TASK=slim lnn_regression/della_train.sbatch
 ```
 
-The training job saves `latest.pt` every epoch, selects `best.pt` by validation
+For the seven **pending** jobs submitted before this calibration change, cancel
+only those job IDs, then pull and calibrate before submitting replacements:
+
+```bash
+scancel 16910982 16910983 16910984 16910985 16910986 16910987 16910988
+squeue -u "$USER" -n lnn-regress
+cd ~/smart-pixels-ml
+git pull --ff-only origin wip-mila
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+python -m lnn_regression.calibrate --data "$DATA/prepared/2frame_2bit" \
+  --target-span 1 --margin 0.1 --readout-bits 64
+```
+
+The training job writes to `$DATA/runs_centered/`, keeping these calibrated
+runs separate from the earlier uncentered jobs. It saves `latest.pt` every
+epoch, selects `best.pt` by validation
 loss, then writes `test/metrics.json`, `test/predictions.parquet`,
 `test/residuals.png`, `test/history.png`, and for Full/Max `test/pulls.png`. It
 also exports the binary-input gate core to `export/circuit.json` and
@@ -125,14 +165,11 @@ with `--frames 20 --out "$DATA/prepared/20frame_2bit"`, then point `--data` at
 that directory in a direct `python -m lnn_regression.run train ...` invocation.
 This is *not* the paper's 20-frame electron-precision study.
 
-### Jobs started before the per-feature GroupSum update
+### Earlier checkpoints
 
-Checkpoints produced by the earlier readout are compatible and do not need
-retraining. The old model computed the same count-to-value mapping after one
-multi-output `GroupSum`; the updated model stores that mapping in one
-`GroupSum(k=1)` per feature so `tau` and `beta` survive circuit lowering.
-After all jobs using the old checkout finish, pull the latest `wip-mila` and
-export every completed run:
+Earlier checkpoints can still be evaluated and exported using their original
+zero-offset scale and readout. They cannot be resumed into the new centered
+calibration, so new jobs use `runs_centered`. To export earlier completed runs:
 
 ```bash
 cd ~/smart-pixels-ml
@@ -154,8 +191,8 @@ After the runs finish, make a paper-style residual summary:
 ```bash
 DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
 python -m lnn_regression.compare \
-  --metrics "$DATA"/runs/*_*/test/metrics.json \
-  --out "$DATA/runs/comparison.png"
+  --metrics "$DATA"/runs_centered/*_*/test/metrics.json \
+  --out "$DATA/runs_centered/comparison.png"
 ```
 
 Each `metrics.json` reports mean, standard deviation, mean absolute residual,
@@ -167,7 +204,8 @@ allowing for the model and split differences above.
 
 ## Local smoke check
 
-For a small prepared dataset, use `python -m lnn_regression.run train --data
-PATH --out PATH --architecture mlp --task slim --epochs 2 --batch-size 16`.
+For a small prepared dataset, first run `python -m lnn_regression.calibrate
+--data PATH`, then use `python -m lnn_regression.run train --data PATH --out
+PATH --architecture mlp --task slim --epochs 2 --batch-size 16`.
 This repo does not contain the 15 GB of public input archives, so full physical
 metrics are produced only after the Della jobs run.

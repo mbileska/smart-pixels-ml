@@ -18,8 +18,10 @@ def main():
     from torchlogix import Circuit
 
     checkpoint = torch.load(args.checkpoint, map_location="cpu", weights_only=False)
+    calibration = checkpoint.get("calibration")
     model = LogicRegressor(checkpoint["architecture"], checkpoint["task"],
-                           checkpoint["frames"], checkpoint["readout_bits"], "cpu")
+                           checkpoint["frames"], checkpoint["readout_bits"], "cpu",
+                           calibration["readout_bounds"] if calibration else None)
     model.load_state_dict(checkpoint["model"])
     model.eval()
     core = CircuitReadout(model)
@@ -64,6 +66,8 @@ def main():
         "group_sum_tau_beta": original_readouts,
         "compiled_tau_beta": [{"tau": sr.tau, "beta": sr.beta} for sr in output_reductions],
         "label_scale": checkpoint["label_scale"],
+        "label_center": checkpoint.get("label_center", [0.0] * 4),
+        "normalized_group_sum_bounds": (calibration["readout_bounds"] if calibration else None),
         "thresholds_electrons": checkpoint["data_metadata"]["thresholds_electrons"],
         "note": ("C/JSON include tau and beta. Simplification may fold constant gate outputs "
                  "into compiled beta while preserving the exact result. Current TorchLogix "

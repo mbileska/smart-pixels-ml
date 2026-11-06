@@ -44,7 +44,8 @@ class LogicRegressor(nn.Module):
     binary gates; there are no trainable floating-point dense or convolution layers.
     """
 
-    def __init__(self, architecture="mlp", task="slim", frames=2, readout_bits=64, device="cpu"):
+    def __init__(self, architecture="mlp", task="slim", frames=2, readout_bits=64,
+                 device="cpu", readout_bounds=None):
         super().__init__()
         if architecture not in ("mlp", "conv1d", "conv2d"):
             raise ValueError(architecture)
@@ -95,12 +96,26 @@ class LogicRegressor(nn.Module):
                                                                "weight_init": "random"})
         # One independent sum per physical output. GroupSum owns the scale and
         # offset so TorchLogix preserves them in Circuit sum_nodes and C code.
-        mean_count = 3 if task == "slim" else 4
-        readout_specs = ([(readout_bits / 4, -readout_bits / 2)] * mean_count)
+        # Calibration supplies independently fitted intervals for each feature.
+        # Legacy defaults permit older checkpoints to remain evaluable.
+        if readout_bounds is None:
+            readout_bounds = {"mean": [[-2.0, 2.0]] * 4,
+                              "sigma": [[0.02, 2.02]] * 4,
+                              "offdiag": [[-1.0, 1.0]] * 6}
+        mean_indices = (0, 1, 3) if task == "slim" else (0, 1, 2, 3)
+        bounds = [readout_bounds["mean"][i] for i in mean_indices]
         if task != "slim":
-            readout_specs += [(readout_bits / 2, 0.01 * readout_bits)] * 4
+            bounds += list(readout_bounds["sigma"])
         if task == "max":
-            readout_specs += [(readout_bits / 2, -readout_bits / 2)] * 6
+            bounds += list(readout_bounds["offdiag"])
+        if len(bounds) != n_raw:
+            raise ValueError("Readout bounds do not match output count")
+        readout_specs = []
+        for low, high in bounds:
+            if not (math.isfinite(low) and math.isfinite(high) and low < high):
+                raise ValueError(f"Invalid GroupSum bounds: {low}, {high}")
+            tau = readout_bits / (high - low)
+            readout_specs.append((tau, low * tau))
         self.readouts = nn.ModuleList(
             GroupSum(k=1, tau=tau, beta=beta, device=device)
             for tau, beta in readout_specs

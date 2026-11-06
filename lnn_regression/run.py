@@ -42,18 +42,18 @@ def split_batches(folder, batch_size, shuffle=False, seed=42):
         yield np.concatenate(x_parts), np.concatenate(y_parts)
 
 
-def model_batch(model, x, y, scale, task, device):
+def model_batch(model, x, y, center, scale, task, device):
     x = torch.from_numpy(x).to(device)
-    y = torch.from_numpy(y).to(device) / scale
+    y = (torch.from_numpy(y).to(device) - center) / scale
     return regression_loss(model(x), y, task)
 
 
-def evaluate_loss(model, folder, batch_size, scale, task, device):
+def evaluate_loss(model, folder, batch_size, center, scale, task, device):
     model.eval()
     total, count = 0.0, 0
     with torch.no_grad():
         for x, y in split_batches(folder, batch_size):
-            loss = model_batch(model, x, y, scale, task, device)
+            loss = model_batch(model, x, y, center, scale, task, device)
             total += loss.item() * len(y)
             count += len(y)
     return total / count
@@ -62,14 +62,30 @@ def evaluate_loss(model, folder, batch_size, scale, task, device):
 def train(args):
     data = Path(args.data)
     metadata = json.loads((data / "metadata.json").read_text())
+    calibration_path = data / "calibration.json"
+    if not calibration_path.exists():
+        raise FileNotFoundError(f"{calibration_path}; first run python -m lnn_regression.calibrate --data {data}")
+    calibration = json.loads(calibration_path.read_text())
+    if calibration["label_names"] != metadata["label_names"]:
+        raise ValueError("Calibration and prepared data disagree on labels")
+    if calibration["prepared_counts"] != {name: metadata["counts"][name]
+                                           for name in ("train", "val", "test")}:
+        raise ValueError("Calibration and prepared data disagree on split counts")
+    outside = {name: calibration["split_stats"][name]["outside_readout_count"]
+               for name in ("train", "val", "test")}
+    if any(any(counts) for counts in outside.values()):
+        raise ValueError(f"Some labels cannot be represented by GroupSum: {outside}; "
+                         "rerun calibration with a larger --margin before training")
     frames = len(metadata["frames"])
     torch.manual_seed(args.seed)
     np.random.seed(args.seed)
     random.seed(args.seed)
     device = torch.device(args.device)
-    model = LogicRegressor(args.architecture, args.task, frames, args.readout_bits, str(device)).to(device)
+    model = LogicRegressor(args.architecture, args.task, frames, args.readout_bits,
+                           str(device), calibration["readout_bounds"]).to(device)
     optimizer = torch.optim.NAdam(model.parameters(), lr=args.lr)
-    scale = torch.tensor(metadata["label_scale"], dtype=torch.float32, device=device)
+    center = torch.tensor(calibration["label_center"], dtype=torch.float32, device=device)
+    scale = torch.tensor(calibration["label_scale"], dtype=torch.float32, device=device)
     args.out.mkdir(parents=True, exist_ok=True)
     history_path = args.out / "history.csv"
     best = math.inf
@@ -80,8 +96,8 @@ def train(args):
             raise FileNotFoundError(latest_path)
         latest = torch.load(latest_path, map_location=device, weights_only=False)
         if (latest["architecture"], latest["task"], latest["frames"], latest["readout_bits"],
-                latest["label_scale"]) != (args.architecture, args.task, frames, args.readout_bits,
-                                              metadata["label_scale"]):
+                latest.get("calibration")) != (args.architecture, args.task, frames,
+                                                args.readout_bits, calibration):
             raise ValueError("Resume configuration does not match latest checkpoint")
         model.load_state_dict(latest["model"])
         optimizer.load_state_dict(latest["optimizer"])
@@ -98,14 +114,15 @@ def train(args):
             total, count = 0.0, 0
             for x, y in split_batches(data / "train", args.batch_size, shuffle=True, seed=args.seed + epoch):
                 optimizer.zero_grad(set_to_none=True)
-                loss = model_batch(model, x, y, scale, args.task, device)
+                loss = model_batch(model, x, y, center, scale, args.task, device)
                 if not torch.isfinite(loss):
                     raise FloatingPointError(f"Nonfinite training loss at epoch {epoch}")
                 loss.backward()
                 optimizer.step()
                 total += loss.item() * len(y)
                 count += len(y)
-            val_loss = evaluate_loss(model, data / "val", args.batch_size, scale, args.task, device)
+            val_loss = evaluate_loss(model, data / "val", args.batch_size, center,
+                                     scale, args.task, device)
             train_loss = total / count
             writer.writerow((epoch, train_loss, val_loss))
             history.flush()
@@ -114,12 +131,15 @@ def train(args):
                 best = val_loss
                 torch.save({"model": model.state_dict(), "architecture": args.architecture,
                             "task": args.task, "frames": frames, "readout_bits": args.readout_bits,
-                            "label_scale": metadata["label_scale"], "seed": args.seed,
+                            "label_center": calibration["label_center"],
+                            "label_scale": calibration["label_scale"],
+                            "calibration": calibration, "seed": args.seed,
                             "best_epoch": epoch, "best_val_loss": best,
                             "data_metadata": metadata}, args.out / "best.pt")
             torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
                         "architecture": args.architecture, "task": args.task, "frames": frames,
-                        "readout_bits": args.readout_bits, "label_scale": metadata["label_scale"],
+                        "readout_bits": args.readout_bits, "label_center": calibration["label_center"],
+                        "label_scale": calibration["label_scale"], "calibration": calibration,
                         "epoch": epoch, "best_val_loss": best}, args.out / "latest.pt")
 
 
@@ -134,14 +154,23 @@ def minimum_interval_68(residual):
 def evaluate(args):
     checkpoint = torch.load(args.checkpoint, map_location=args.device, weights_only=False)
     metadata = json.loads((Path(args.data) / "metadata.json").read_text())
-    if metadata["label_scale"] != checkpoint["label_scale"] or len(metadata["frames"]) != checkpoint["frames"]:
-        raise ValueError("Checkpoint and prepared data disagree on scale or time frames")
+    calibration = checkpoint.get("calibration")
+    if len(metadata["frames"]) != checkpoint["frames"]:
+        raise ValueError("Checkpoint and prepared data disagree on time frames")
+    if calibration is not None:
+        current_calibration = json.loads((Path(args.data) / "calibration.json").read_text())
+        if current_calibration != calibration:
+            raise ValueError("Checkpoint and prepared data disagree on calibration")
+    elif metadata["label_scale"] != checkpoint["label_scale"]:
+        raise ValueError("Legacy checkpoint and prepared data disagree on scale")
     device = torch.device(args.device)
     model = LogicRegressor(checkpoint["architecture"], checkpoint["task"],
-                           checkpoint["frames"], checkpoint["readout_bits"], str(device)).to(device)
+                           checkpoint["frames"], checkpoint["readout_bits"], str(device),
+                           calibration["readout_bounds"] if calibration else None).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()  # TorchLogix selects hard LUTs in eval mode.
     scale = np.asarray(checkpoint["label_scale"], dtype=np.float32)
+    center = np.asarray(checkpoint.get("label_center", [0.0] * 4), dtype=np.float32)
     rows = []
     with torch.no_grad():
         for x, y in split_batches(Path(args.data) / args.split, args.batch_size):
@@ -155,7 +184,7 @@ def evaluate(args):
                           "cotAtrue": float(y[i, 2]), "cotBtrue": float(y[i, 3])}
                 for j, k in enumerate(names):
                     key = ("x", "y", "cotA", "cotB")[k]
-                    record[key] = float(mean[i, j] * scale[k])
+                    record[key] = float(mean[i, j] * scale[k] + center[k])
                     if sigma is not None:
                         record["sigma" + key] = float(sigma[i, j] * scale[k])
                 rows.append(record)
