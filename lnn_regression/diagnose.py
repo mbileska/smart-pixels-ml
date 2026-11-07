@@ -143,7 +143,8 @@ def main():
     calibration = saved["calibration"]
     bits = saved["readout_bits"]
     report = {"checkpoint": str(checkpoint), "readout_gates_per_feature": bits,
-              "best_epoch": saved["best_epoch"], "features": {}}
+              "best_epoch": saved["best_epoch"],
+              "projection": saved.get("projection", "or"), "features": {}}
     values = {}
     for feature, index, units in FEATURES:
         values[feature] = {}

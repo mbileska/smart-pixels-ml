@@ -82,7 +82,7 @@ def train(args):
     random.seed(args.seed)
     device = torch.device(args.device)
     model = LogicRegressor(args.architecture, args.task, frames, args.readout_bits,
-                           str(device), calibration["readout_bounds"]).to(device)
+                           str(device), calibration["readout_bounds"], args.projection).to(device)
     optimizer = torch.optim.NAdam(model.parameters(), lr=args.lr)
     center = torch.tensor(calibration["label_center"], dtype=torch.float32, device=device)
     scale = torch.tensor(calibration["label_scale"], dtype=torch.float32, device=device)
@@ -96,8 +96,9 @@ def train(args):
             raise FileNotFoundError(latest_path)
         latest = torch.load(latest_path, map_location=device, weights_only=False)
         if (latest["architecture"], latest["task"], latest["frames"], latest["readout_bits"],
-                latest.get("calibration")) != (args.architecture, args.task, frames,
-                                                args.readout_bits, calibration):
+                latest.get("projection", "or"), latest.get("calibration")) != (
+                    args.architecture, args.task, frames, args.readout_bits,
+                    args.projection, calibration):
             raise ValueError("Resume configuration does not match latest checkpoint")
         model.load_state_dict(latest["model"])
         optimizer.load_state_dict(latest["optimizer"])
@@ -133,13 +134,15 @@ def train(args):
                             "task": args.task, "frames": frames, "readout_bits": args.readout_bits,
                             "label_center": calibration["label_center"],
                             "label_scale": calibration["label_scale"],
-                            "calibration": calibration, "seed": args.seed,
+                            "calibration": calibration, "projection": args.projection,
+                            "seed": args.seed,
                             "best_epoch": epoch, "best_val_loss": best,
                             "data_metadata": metadata}, args.out / "best.pt")
             torch.save({"model": model.state_dict(), "optimizer": optimizer.state_dict(),
                         "architecture": args.architecture, "task": args.task, "frames": frames,
                         "readout_bits": args.readout_bits, "label_center": calibration["label_center"],
                         "label_scale": calibration["label_scale"], "calibration": calibration,
+                        "projection": args.projection,
                         "epoch": epoch, "best_val_loss": best}, args.out / "latest.pt")
 
 
@@ -166,7 +169,8 @@ def evaluate(args):
     device = torch.device(args.device)
     model = LogicRegressor(checkpoint["architecture"], checkpoint["task"],
                            checkpoint["frames"], checkpoint["readout_bits"], str(device),
-                           calibration["readout_bounds"] if calibration else None).to(device)
+                           calibration["readout_bounds"] if calibration else None,
+                           checkpoint.get("projection", "or")).to(device)
     model.load_state_dict(checkpoint["model"])
     model.eval()  # TorchLogix selects hard LUTs in eval mode.
     scale = np.asarray(checkpoint["label_scale"], dtype=np.float32)
@@ -196,7 +200,8 @@ def evaluate(args):
     df.to_parquet(args.out / "predictions.parquet", index=False)
     metrics = {"n": len(df), "split": args.split, "task": checkpoint["task"],
                "architecture": checkpoint["architecture"], "best_epoch": checkpoint["best_epoch"],
-               "best_val_loss": checkpoint["best_val_loss"]}
+               "best_val_loss": checkpoint["best_val_loss"],
+               "projection": checkpoint.get("projection", "or")}
     plot_keys = ["x", "y", "cotB"] if checkpoint["task"] == "slim" else ["x", "y", "cotA", "cotB"]
     fig, axes = plt.subplots(1, len(plot_keys), figsize=(4.2 * len(plot_keys), 3.8))
     pulls = {}
@@ -264,6 +269,8 @@ def main():
     train_p.add_argument("--out", type=Path, required=True)
     train_p.add_argument("--architecture", choices=("mlp", "conv1d", "conv2d"), default="mlp")
     train_p.add_argument("--task", choices=("slim", "full", "max"), default="slim")
+    train_p.add_argument("--projection", choices=("or", "charge_sum"), default="or",
+                         help="MLP charge_sum preserves the paper's average-charge projections")
     train_p.add_argument("--epochs", type=int, default=1000)
     train_p.add_argument("--batch-size", type=int, default=5000)
     train_p.add_argument("--readout-bits", type=int, default=64)

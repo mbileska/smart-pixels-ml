@@ -12,6 +12,7 @@ cd "$SLURM_SUBMIT_DIR"
 export MPLCONFIGDIR=/scratch/gpfs/IOJALVO/mb7126/lnn_regression/mplconfig
 mkdir -p "$MPLCONFIGDIR"
 DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+RUN_NAME=${RUN_NAME:-mlp_slim}
 python -m lnn_regression.diagnose \
   --data "$DATA/prepared/2frame_2bit" \
-  --run "$DATA/runs_centered/mlp_slim"
+  --run "$DATA/runs_centered/$RUN_NAME"

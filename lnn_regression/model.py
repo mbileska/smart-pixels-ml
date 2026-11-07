@@ -21,6 +21,47 @@ def reduce_gates(input_width, output_width, device):
     return nn.Sequential(*layers)
 
 
+def add_binary_words(left, right):
+    """A fixed ripple-carry adder built only from Boolean gate operations."""
+    if len(left) != len(right):
+        raise ValueError("Adder inputs must have equal widths")
+    result = [left[0] ^ right[0]]
+    carry = left[0] & right[0]
+    for a, b in zip(left[1:], right[1:]):
+        propagate = a ^ b
+        result.append(propagate ^ carry)
+        carry = (a & b) | (propagate & carry)
+    return tuple(result + [carry])
+
+
+def charge_sum_projections(bits, frames):
+    """Exact per-axis sums of 2-bit ADC codes, encoded as six Boolean bits.
+
+    Summing the 16 pixel codes and dividing by 16 is the paper's average
+    projection. The division is a fixed scale and need not be implemented in
+    the binary input to the learned logic gates. This Boolean adder tree keeps
+    charge multiplicity that OR pooling discards and lowers to circuit gates.
+    """
+    batch = bits.shape[0]
+    b = bits.bool().reshape(batch, frames, 3, 16, 16)
+    # Thermometer code (>=1, >=2, >=3) to ordinary two-bit ADC code.
+    low = b[:, :, 0] ^ b[:, :, 1] ^ b[:, :, 2]
+    high = b[:, :, 1]
+
+    def project(axis):
+        words = []
+        for i in range(16):
+            words.append((low[:, :, :, i], high[:, :, :, i]) if axis == "x" else
+                         (low[:, :, i, :], high[:, :, i, :]))
+        while len(words) > 1:
+            words = [add_binary_words(words[i], words[i + 1])
+                     for i in range(0, len(words), 2)]
+        projected = torch.cat([word.unsqueeze(-1) for word in words[0]], dim=-1).flatten(1)
+        return projected if bits.dtype == torch.bool else projected.to(bits.dtype)
+
+    return project("x"), project("y")
+
+
 class CircuitReadout(nn.Module):
     """Binary-input gate core for TorchLogix Circuit export.
 
@@ -40,12 +81,13 @@ class LogicRegressor(nn.Module):
     """Paper-shaped MLP, Conv1D and Conv2D alternatives using Boolean gates.
 
     The ADC levels are encoded as three cumulative comparator bits. All learned
-    operations are LUT gates. Pooling is OR, and the fixed output decoder counts
-    binary gates; there are no trainable floating-point dense or convolution layers.
+    operations are LUT gates. Fixed Boolean projection or pooling feeds the
+    learned network; the output decoder counts binary gates. There are no
+    trainable floating-point dense or convolution layers.
     """
 
     def __init__(self, architecture="mlp", task="slim", frames=2, readout_bits=64,
-                 device="cpu", readout_bounds=None):
+                 device="cpu", readout_bounds=None, projection="or"):
         super().__init__()
         if architecture not in ("mlp", "conv1d", "conv2d"):
             raise ValueError(architecture)
@@ -53,7 +95,10 @@ class LogicRegressor(nn.Module):
             raise ValueError(task)
         if task == "max" and architecture != "conv2d":
             raise ValueError("The paper uses Max only with Conv2D")
+        if projection not in ("or", "charge_sum") or (projection == "charge_sum" and architecture != "mlp"):
+            raise ValueError("charge_sum projection is currently supported for MLP only")
         self.architecture, self.task, self.frames = architecture, task, frames
+        self.projection = projection
         if readout_bits < 1:
             raise ValueError("readout_bits must be positive")
         self.readout_bits = readout_bits
@@ -62,8 +107,9 @@ class LogicRegressor(nn.Module):
                                       parametrization_kwargs={"forward_sampling": "hard"})
         channels = 3 * frames
         if architecture == "mlp":
-            self.proj_x = reduce_gates(16 * channels, 16, device)
-            self.proj_y = reduce_gates(16 * channels, 16, device)
+            projection_width = 16 * (6 * frames if projection == "charge_sum" else channels)
+            self.proj_x = reduce_gates(projection_width, 16, device)
+            self.proj_y = reduce_gates(projection_width, 16, device)
             self.embedding = gate(32, 16)
             self.hidden1 = gate(16, 16)
             self.hidden2 = gate(16, 16)
@@ -125,17 +171,20 @@ class LogicRegressor(nn.Module):
         """Evaluate gate network on thermometer-encoded binary ADC inputs."""
         assert bits.ndim == 4 and bits.shape[1:] == (3 * self.frames, 16, 16)
         if self.architecture in ("mlp", "conv1d"):
-            # Boolean projection counterpart of the paper's charge average pooling.
-            if bits.dtype == torch.bool:
-                proj_x = bits[:, :, :, 0]
-                proj_y = bits[:, :, 0, :]
-                for i in range(1, 16):
-                    proj_x = proj_x | bits[:, :, :, i]
-                    proj_y = proj_y | bits[:, :, i, :]
+            if self.architecture == "mlp" and self.projection == "charge_sum":
+                proj_x, proj_y = charge_sum_projections(bits, self.frames)
             else:
-                proj_x = bits.amax(dim=3)
-                proj_y = bits.amax(dim=2)
-            proj_x, proj_y = proj_x.flatten(1), proj_y.flatten(1)
+                # Legacy OR projection retained for existing checkpoints.
+                if bits.dtype == torch.bool:
+                    proj_x = bits[:, :, :, 0]
+                    proj_y = bits[:, :, 0, :]
+                    for i in range(1, 16):
+                        proj_x = proj_x | bits[:, :, :, i]
+                        proj_y = proj_y | bits[:, :, i, :]
+                else:
+                    proj_x = bits.amax(dim=3)
+                    proj_y = bits.amax(dim=2)
+                proj_x, proj_y = proj_x.flatten(1), proj_y.flatten(1)
             if self.architecture == "mlp":
                 x = self.proj_x(proj_x)
                 y = self.proj_y(proj_y)

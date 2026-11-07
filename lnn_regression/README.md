@@ -221,6 +221,55 @@ training-mean baseline, and the fraction of predictions at each GroupSum limit.
 The plot's four columns show truth/prediction distributions, residuals,
 prediction versus truth, and output count use for x, y, and beta.
 
+### Rerun MLP Slim with charge-preserving projections
+
+The original LNN MLP used OR across each row/column of ADC comparator bits.
+That retains whether any pixel crosses each threshold but discards how many
+pixels do. `--projection charge_sum` instead uses fixed Boolean adders to sum
+the 16 two-bit ADC codes along each axis and frame. The six output bits encode
+the exact integer sum, equivalent to the paper's average pooling up to its
+fixed factor of 1/16. The learned layers remain TorchLogix logic gates, and
+the whole binary-input model lowers to a TorchLogix `Circuit` and C/JSON.
+This uses more gates in the fixed projection, so hardware area must be assessed
+after physics performance is known. `export/readout.json` records the circuit
+gate count for each run; this is a logic count, not an ASIC area measurement.
+
+From any Della shell, using the `mbileska/smart-pixels-ml` checkout:
+
+```bash
+cd ~/smart-pixels-ml
+git switch wip-mila
+git pull --ff-only origin wip-mila
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+module load anaconda3/2026.7
+conda activate "$DATA/env"
+export MPLCONFIGDIR="$DATA/mplconfig"
+mkdir -p "$MPLCONFIGDIR"
+python -m unittest lnn_regression.test_charge_projection
+JOB=$(sbatch --parsable --time=08:00:00 \
+  --export=ALL,ARCH=mlp,TASK=slim,PROJECTION=charge_sum \
+  lnn_regression/della_train.sbatch)
+echo "Charge-sum MLP Slim job: $JOB"
+squeue -j "$JOB"
+```
+
+The new run is `$DATA/runs_centered/mlp_slim_charge_sum`; the old OR run stays
+at `$DATA/runs_centered/mlp_slim`. If the eight-hour allocation ends before
+epoch 1000, submit the same `sbatch` command again to resume. When training,
+test evaluation, and export finish, compare the two runs:
+
+```bash
+RUN="$DATA/runs_centered/mlp_slim_charge_sum"
+cat "$RUN/test/metrics.json"
+python -m lnn_regression.compare \
+  --metrics "$DATA/runs_centered/mlp_slim/test/metrics.json" \
+            "$RUN/test/metrics.json" \
+  --out "$DATA/runs_centered/or_vs_charge_sum.png"
+DIAG=$(sbatch --parsable --export=ALL,RUN_NAME=mlp_slim_charge_sum \
+  lnn_regression/della_diagnose.sbatch)
+echo "Diagnostic job: $DIAG"
+```
+
 ## Local smoke check
 
 For a small prepared dataset, first run `python -m lnn_regression.calibrate

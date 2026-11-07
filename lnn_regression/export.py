@@ -21,7 +21,8 @@ def main():
     calibration = checkpoint.get("calibration")
     model = LogicRegressor(checkpoint["architecture"], checkpoint["task"],
                            checkpoint["frames"], checkpoint["readout_bits"], "cpu",
-                           calibration["readout_bounds"] if calibration else None)
+                           calibration["readout_bounds"] if calibration else None,
+                           checkpoint.get("projection", "or"))
     model.load_state_dict(checkpoint["model"])
     model.eval()
     core = CircuitReadout(model)
@@ -63,6 +64,9 @@ def main():
         "input_encoding": "2-bit ADC code -> three cumulative comparator bits per pixel and frame",
         "binary_input_shape": list(input_shape),
         "feature_names": parameter_names,
+        "projection": checkpoint.get("projection", "or"),
+        "circuit_gate_count": len(circuit.gates),
+        "circuit_sum_nodes": len(circuit.sum_nodes),
         "group_sum_tau_beta": original_readouts,
         "compiled_tau_beta": [{"tau": sr.tau, "beta": sr.beta} for sr in output_reductions],
         "label_scale": checkpoint["label_scale"],
