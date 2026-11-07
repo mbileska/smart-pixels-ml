@@ -202,6 +202,25 @@ pull mean/std, and one-sigma coverage. Residuals use the paper convention
 `prediction - truth`. Compare these test results with the paper's Figure 4,
 allowing for the model and split differences above.
 
+### Diagnose a completed Slim run
+
+The diagnostic evaluates `best.pt` on the validation split, then compares
+validation and test truth distributions, predictions, residuals, and GroupSum
+gate counts. This helps distinguish a train-to-test distribution shift from
+readout saturation or predictions collapsing to a few count values. It does
+not retrain the network. Submit from the `smart-pixels-ml` repository root:
+
+```bash
+sbatch lnn_regression/della_diagnose.sbatch
+```
+
+The CPU job writes `$DATA/runs_centered/mlp_slim/val/{metrics.json,residuals.png}`
+and `$DATA/runs_centered/mlp_slim/diagnostics/{diagnostics.json,val_test_diagnostics.png}`.
+`diagnostics.json` includes 68% residual intervals, bias, R², a constant
+training-mean baseline, and the fraction of predictions at each GroupSum limit.
+The plot's four columns show truth/prediction distributions, residuals,
+prediction versus truth, and output count use for x, y, and beta.
+
 ## Local smoke check
 
 For a small prepared dataset, first run `python -m lnn_regression.calibrate
