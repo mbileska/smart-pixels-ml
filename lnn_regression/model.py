@@ -62,6 +62,51 @@ def charge_sum_projections(bits, frames):
     return project("x"), project("y")
 
 
+CHARGE_THRESHOLDS = (2, 4, 8, 16, 32)
+
+
+def or_projections(bits):
+    """Whether each ADC comparator fired anywhere on an axis."""
+    if bits.dtype == torch.bool:
+        proj_x = bits[:, :, :, 0]
+        proj_y = bits[:, :, 0, :]
+        for i in range(1, 16):
+            proj_x = proj_x | bits[:, :, :, i]
+            proj_y = proj_y | bits[:, :, i, :]
+    else:
+        proj_x = bits.amax(dim=3)
+        proj_y = bits.amax(dim=2)
+    return proj_x.flatten(1), proj_y.flatten(1)
+
+
+def or_charge_threshold_projections(bits, frames):
+    """Keep ADC OR signals and ordered threshold signals for axis charge sums.
+
+    Each threshold is a power of two, so a six-bit sum reaches it exactly when
+    any bit at or above its position is set. This lowers to Boolean OR gates.
+    The sums are per time frame and per coordinate, as in the paper's pooling.
+    """
+    or_x, or_y = or_projections(bits)
+    sum_x, sum_y = charge_sum_projections(bits, frames)
+    batch = bits.shape[0]
+
+    def combine(ors, sums):
+        binary = sums.bool().reshape(batch, frames, 16, 6)
+        thresholds = []
+        for value in CHARGE_THRESHOLDS:
+            bit = value.bit_length() - 1
+            reached = binary[:, :, :, bit]
+            for higher in range(bit + 1, 6):
+                reached = reached | binary[:, :, :, higher]
+            thresholds.append(reached.unsqueeze(2))
+        ordered = torch.cat(thresholds, dim=2)
+        if bits.dtype != torch.bool:
+            ordered = ordered.to(bits.dtype)
+        return torch.cat((ors.reshape(batch, frames, 3, 16), ordered), dim=2).flatten(1)
+
+    return combine(or_x, sum_x), combine(or_y, sum_y)
+
+
 class CircuitReadout(nn.Module):
     """Binary-input gate core for TorchLogix Circuit export.
 
@@ -95,8 +140,9 @@ class LogicRegressor(nn.Module):
             raise ValueError(task)
         if task == "max" and architecture != "conv2d":
             raise ValueError("The paper uses Max only with Conv2D")
-        if projection not in ("or", "charge_sum") or (projection == "charge_sum" and architecture != "mlp"):
-            raise ValueError("charge_sum projection is currently supported for MLP only")
+        if projection not in ("or", "charge_sum", "or_charge_thresholds") or (
+                projection != "or" and architecture != "mlp"):
+            raise ValueError("Charge projections are currently supported for MLP only")
         self.architecture, self.task, self.frames = architecture, task, frames
         self.projection = projection
         if readout_bits < 1:
@@ -107,7 +153,8 @@ class LogicRegressor(nn.Module):
                                       parametrization_kwargs={"forward_sampling": "hard"})
         channels = 3 * frames
         if architecture == "mlp":
-            projection_width = 16 * (6 * frames if projection == "charge_sum" else channels)
+            projection_width = 16 * ({"or": 3, "charge_sum": 6,
+                                      "or_charge_thresholds": 3 + len(CHARGE_THRESHOLDS)}[projection] * frames)
             self.proj_x = reduce_gates(projection_width, 16, device)
             self.proj_y = reduce_gates(projection_width, 16, device)
             self.embedding = gate(32, 16)
@@ -173,18 +220,11 @@ class LogicRegressor(nn.Module):
         if self.architecture in ("mlp", "conv1d"):
             if self.architecture == "mlp" and self.projection == "charge_sum":
                 proj_x, proj_y = charge_sum_projections(bits, self.frames)
+            elif self.architecture == "mlp" and self.projection == "or_charge_thresholds":
+                proj_x, proj_y = or_charge_threshold_projections(bits, self.frames)
             else:
                 # Legacy OR projection retained for existing checkpoints.
-                if bits.dtype == torch.bool:
-                    proj_x = bits[:, :, :, 0]
-                    proj_y = bits[:, :, 0, :]
-                    for i in range(1, 16):
-                        proj_x = proj_x | bits[:, :, :, i]
-                        proj_y = proj_y | bits[:, :, i, :]
-                else:
-                    proj_x = bits.amax(dim=3)
-                    proj_y = bits.amax(dim=2)
-                proj_x, proj_y = proj_x.flatten(1), proj_y.flatten(1)
+                proj_x, proj_y = or_projections(bits)
             if self.architecture == "mlp":
                 x = self.proj_x(proj_x)
                 y = self.proj_y(proj_y)

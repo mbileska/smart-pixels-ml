@@ -269,8 +269,9 @@ def main():
     train_p.add_argument("--out", type=Path, required=True)
     train_p.add_argument("--architecture", choices=("mlp", "conv1d", "conv2d"), default="mlp")
     train_p.add_argument("--task", choices=("slim", "full", "max"), default="slim")
-    train_p.add_argument("--projection", choices=("or", "charge_sum"), default="or",
-                         help="MLP charge_sum preserves the paper's average-charge projections")
+    train_p.add_argument("--projection", choices=("or", "charge_sum", "or_charge_thresholds"),
+                         default="or", help="MLP axis projection: OR, binary charge sum, or OR "
+                         "plus ordered charge thresholds")
     train_p.add_argument("--epochs", type=int, default=1000)
     train_p.add_argument("--batch-size", type=int, default=5000)
     train_p.add_argument("--readout-bits", type=int, default=64)

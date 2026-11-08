@@ -42,11 +42,13 @@ numerical reproduction of its figure is not claimed.
 The three network layouts follow the paper's MLP, projected Conv1D, and spatial
 Conv2D variants. The learned layers are `LogicDense` and `LogicConv2d` gates
 from TorchLogix. A 2-bit ADC value is encoded as three cumulative comparator
-bits. Projection and spatial pooling use Boolean OR, the logic equivalent of
-max pooling; the paper uses charge averages. Binary fan-in requires extra gate
-reduction stages before the 16-node blocks. Each output feature has an
-independent `GroupSum(k=1)` over its binary gates. Each mean head receives its
-own `tau` and `beta`, fitted from the training feature's centered range with
+bits. The default projection and spatial pooling use Boolean OR, the logic
+equivalent of max pooling; the paper uses charge averages. Optional MLP
+projections preserve charge sums or combine OR with charge thresholds. Binary
+fan-in requires extra gate reduction stages before the 16-node blocks. Each
+output feature has an independent `GroupSum(k=1)` over its binary gates. Each
+mean head receives its own `tau` and `beta`, fitted from the training feature's
+centered range with
 10% headroom on both ends and at least 10% beyond [-1, 1]. The output is
 `(count + beta) / tau`, with `tau = readout_bits / (upper - lower)` and
 `beta = lower * tau`. Separate positive intervals are used for uncertainty
@@ -266,6 +268,66 @@ python -m lnn_regression.compare \
             "$RUN/test/metrics.json" \
   --out "$DATA/runs_centered/or_vs_charge_sum.png"
 DIAG=$(sbatch --parsable --export=ALL,RUN_NAME=mlp_slim_charge_sum \
+  lnn_regression/della_diagnose.sbatch)
+echo "Diagnostic job: $DIAG"
+```
+
+### Test OR plus ordered charge thresholds for MLP Slim
+
+The charge-sum run improved the Slim beta test MAE from 16.84° to 12.64°, but
+worsened the x/y 68% residual widths from 60.95/11.51 µm to 77.39/28.87 µm.
+Its x/y validation widths also worsened. None of the three GroupSum counts
+reached 0 or 64, so the next test targets input encoding rather than readout
+range. The binary charge sum may be difficult for the small learned gate block
+to decode; this is a hypothesis to test.
+
+`--projection or_charge_thresholds` retains the three ADC comparator OR signals
+per axis, coordinate, and frame, and adds five ordered signals for charge-code
+sums reaching 2, 4, 8, 16, or 32. A sum can range from 0 to 48. These signals
+are computed by fixed Boolean gates from the same input, preserving the pure
+logic circuit. They add gates, so compare circuit gate counts in
+`export/readout.json` and do not treat them as an ASIC area estimate.
+
+On Della, from any shell:
+
+```bash
+cd ~/smart-pixels-ml
+git switch wip-mila
+git pull --ff-only origin wip-mila
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+module load anaconda3/2026.7
+conda activate "$DATA/env"
+export MPLCONFIGDIR="$DATA/mplconfig"
+mkdir -p "$MPLCONFIGDIR"
+python -m unittest lnn_regression.test_charge_projection
+JOB=$(sbatch --parsable --time=08:00:00 \
+  --export=ALL,ARCH=mlp,TASK=slim,PROJECTION=or_charge_thresholds \
+  lnn_regression/della_train.sbatch)
+echo "OR plus charge thresholds MLP Slim job: $JOB"
+squeue -j "$JOB"
+```
+
+The new run is `$DATA/runs_centered/mlp_slim_or_charge_thresholds`. If the
+job hits the eight-hour limit before epoch 1000, repeat the `sbatch` command
+to resume from `latest.pt`. Once it finishes successfully, run these commands
+from any Della shell to compare all three projections and generate diagnostics:
+
+```bash
+cd ~/smart-pixels-ml
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+module load anaconda3/2026.7
+conda activate "$DATA/env"
+export MPLCONFIGDIR="$DATA/mplconfig"
+mkdir -p "$MPLCONFIGDIR"
+RUN="$DATA/runs_centered/mlp_slim_or_charge_thresholds"
+cat "$RUN/test/metrics.json"
+cat "$RUN/export/readout.json"
+python -m lnn_regression.compare \
+  --metrics "$DATA/runs_centered/mlp_slim/test/metrics.json" \
+            "$DATA/runs_centered/mlp_slim_charge_sum/test/metrics.json" \
+            "$RUN/test/metrics.json" \
+  --out "$DATA/runs_centered/slim_projection_comparison.png"
+DIAG=$(sbatch --parsable --export=ALL,RUN_NAME=mlp_slim_or_charge_thresholds \
   lnn_regression/della_diagnose.sbatch)
 echo "Diagnostic job: $DIAG"
 ```
