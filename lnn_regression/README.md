@@ -332,6 +332,80 @@ DIAG=$(sbatch --parsable --export=ALL,RUN_NAME=mlp_slim_or_charge_thresholds \
 echo "Diagnostic job: $DIAG"
 ```
 
+### Paper-style Conv1D Slim pilot
+
+The MLP projection comparison motivates a spatial model. This Conv1D LNN
+uses the paper's two axis projections: sum the 2-bit charge codes across the
+16 pixels of each row or column, separately at each of the two time frames.
+The integer sum (0–48) contains the same information as the paper's average
+charge (sum/16). Six Boolean bits retain the exact sum. Each axis branch then
+uses five TorchLogix convolutional kernels with a three-position window,
+followed by two 16-output logic blocks and three 64-gate GroupSum readouts.
+The output features are x, y, and cot(beta), with the same calibration and
+splits as the completed MLP runs. This is a structural analogue of the
+paper's Conv1D Slim; Boolean LUT gates replace its tanh and dense arithmetic.
+
+The compact circuit input is 384 bits: two axes × two frames × 16 positions ×
+six sum bits. `export/gates.v` and `export/compact_top.sv` implement the learned
+gate network and three unsigned count outputs (7 bits each for 64 gates).
+The upstream pixel-to-axis charge-sum projectors, including their adders, are
+outside this compact RTL, as are the final per-feature tau/beta and physical
+unit conversions. These costs must be included in any eFPGA comparison. The
+384-bit interface fits the stated 632-input limit, but fitting logic RBBs and
+meeting timing still requires synthesis and place-and-route on the target.
+The C/JSON circuit retains calibrated GroupSum reductions; the count-only RTL
+uses the **original** `group_sum_tau_beta` in `export/readout.json` when
+converting counts to normalized predictions.
+
+From any Della shell:
+
+```bash
+cd ~/smart-pixels-ml
+git switch wip-mila
+git pull --ff-only origin wip-mila
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+module load anaconda3/2026.7
+conda activate "$DATA/env"
+export MPLCONFIGDIR="$DATA/mplconfig"
+mkdir -p "$MPLCONFIGDIR"
+python -m unittest lnn_regression.test_conv1d_compact lnn_regression.test_charge_projection
+JOB=$(sbatch --parsable --time=12:00:00 \
+  --export=ALL,ARCH=conv1d,TASK=slim,PROJECTION=charge_sum \
+  lnn_regression/della_train.sbatch)
+echo "Conv1D Slim pilot job: $JOB"
+squeue -j "$JOB"
+```
+
+This writes to `$DATA/runs_centered/conv1d_slim_charge_sum`. If the job reaches
+the time limit before epoch 1000, submit the same `sbatch` command to resume
+from `latest.pt`. After the job completes:
+
+```bash
+cd ~/smart-pixels-ml
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+module load anaconda3/2026.7
+conda activate "$DATA/env"
+export MPLCONFIGDIR="$DATA/mplconfig"
+mkdir -p "$MPLCONFIGDIR"
+RUN="$DATA/runs_centered/conv1d_slim_charge_sum"
+cat "$RUN/test/metrics.json"
+cat "$RUN/export/readout.json"
+python -m lnn_regression.compare \
+  --metrics "$DATA/runs_centered/mlp_slim/test/metrics.json" \
+            "$DATA/runs_centered/mlp_slim_charge_sum/test/metrics.json" \
+            "$DATA/runs_centered/mlp_slim_or_charge_thresholds/test/metrics.json" \
+            "$RUN/test/metrics.json" \
+  --out "$DATA/runs_centered/slim_conv1d_pilot_comparison.png"
+DIAG=$(sbatch --parsable --export=ALL,RUN_NAME=conv1d_slim_charge_sum \
+  lnn_regression/della_diagnose.sbatch)
+echo "Conv1D diagnostic job: $DIAG"
+```
+
+The training script accepts `READOUT_BITS`, `EPOCHS`, and `BATCH_SIZE` through
+the Slurm environment for later width studies. Non-default readout widths get
+their own run suffix (`_g96`, for example). First measure this 64-gate pilot's
+physics and hardware size before expanding the width sweep.
+
 ## Local smoke check
 
 For a small prepared dataset, first run `python -m lnn_regression.calibrate

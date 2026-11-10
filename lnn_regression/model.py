@@ -122,6 +122,27 @@ class CircuitReadout(nn.Module):
         return self.regressor.forward_logic(bits)
 
 
+class CompactChargeCircuitReadout(nn.Module):
+    """Paper-style axis sums as a 384-bit input for two-frame circuit export.
+
+    Each 16-pixel sum is represented by six bits, least significant bit first.
+    X and Y branches are concatenated, with frames and coordinates in order.
+    The upstream charge-sum projectors are outside this compact circuit.
+    """
+
+    def __init__(self, regressor):
+        super().__init__()
+        if regressor.projection != "charge_sum" or regressor.architecture != "conv1d":
+            raise ValueError("Compact charge interface requires Conv1D charge_sum")
+        self.regressor = regressor
+
+    def forward(self, projected_bits):
+        branch_width = self.regressor.frames * 16 * 6
+        assert projected_bits.ndim == 2 and projected_bits.shape[1] == 2 * branch_width
+        return self.regressor.forward_projected_logic(
+            projected_bits[:, :branch_width], projected_bits[:, branch_width:])
+
+
 class LogicRegressor(nn.Module):
     """Paper-shaped MLP, Conv1D and Conv2D alternatives using Boolean gates.
 
@@ -141,8 +162,9 @@ class LogicRegressor(nn.Module):
         if task == "max" and architecture != "conv2d":
             raise ValueError("The paper uses Max only with Conv2D")
         if projection not in ("or", "charge_sum", "or_charge_thresholds") or (
-                projection != "or" and architecture != "mlp"):
-            raise ValueError("Charge projections are currently supported for MLP only")
+                projection == "charge_sum" and architecture == "conv2d") or (
+                projection == "or_charge_thresholds" and architecture != "mlp"):
+            raise ValueError("This charge projection is unsupported for the architecture")
         self.architecture, self.task, self.frames = architecture, task, frames
         self.projection = projection
         if readout_bits < 1:
@@ -162,11 +184,13 @@ class LogicRegressor(nn.Module):
             self.hidden2 = gate(16, 16)
             head_in = 16
         elif architecture == "conv1d":
-            self.proj_x = LogicConv2d(in_dim=(16, 1), channels=channels, num_kernels=5,
-                                      tree_depth=2, receptive_field_size=(3, 1), device=device,
+            conv_channels = 6 * frames if projection == "charge_sum" else channels
+            tree_depth = 6 if projection == "charge_sum" else 2
+            self.proj_x = LogicConv2d(in_dim=(16, 1), channels=conv_channels, num_kernels=5,
+                                      tree_depth=tree_depth, receptive_field_size=(3, 1), device=device,
                                       parametrization_kwargs={"forward_sampling": "hard"})
-            self.proj_y = LogicConv2d(in_dim=(16, 1), channels=channels, num_kernels=5,
-                                      tree_depth=2, receptive_field_size=(3, 1), device=device,
+            self.proj_y = LogicConv2d(in_dim=(16, 1), channels=conv_channels, num_kernels=5,
+                                      tree_depth=tree_depth, receptive_field_size=(3, 1), device=device,
                                       parametrization_kwargs={"forward_sampling": "hard"})
             self.hidden1 = reduce_gates(140, 16, device)
             self.hidden2 = gate(16, 16)
@@ -218,23 +242,43 @@ class LogicRegressor(nn.Module):
         """Evaluate gate network on thermometer-encoded binary ADC inputs."""
         assert bits.ndim == 4 and bits.shape[1:] == (3 * self.frames, 16, 16)
         if self.architecture in ("mlp", "conv1d"):
-            if self.architecture == "mlp" and self.projection == "charge_sum":
+            if self.projection == "charge_sum":
                 proj_x, proj_y = charge_sum_projections(bits, self.frames)
             elif self.architecture == "mlp" and self.projection == "or_charge_thresholds":
                 proj_x, proj_y = or_charge_threshold_projections(bits, self.frames)
             else:
                 # Legacy OR projection retained for existing checkpoints.
                 proj_x, proj_y = or_projections(bits)
-            if self.architecture == "mlp":
-                x = self.proj_x(proj_x)
-                y = self.proj_y(proj_y)
-                z = self.embedding(torch.cat((x, y), dim=1))
-            else:
-                x = self.proj_x(proj_x.reshape(-1, 3 * self.frames, 16, 1))
-                y = self.proj_y(proj_y.reshape(-1, 3 * self.frames, 16, 1))
-                z = torch.cat((x.flatten(1), y.flatten(1)), dim=1)
+            return self.forward_projected_logic(proj_x, proj_y)
         else:
             z = self.pool(self.conv_pointwise(self.conv_spatial(bits))).flatten(1)
+        return self._readout(z)
+
+    def forward_projected_logic(self, proj_x, proj_y):
+        """Evaluate MLP or Conv1D after its fixed axis projection."""
+        if self.architecture == "mlp":
+            x = self.proj_x(proj_x)
+            y = self.proj_y(proj_y)
+            z = self.embedding(torch.cat((x, y), dim=1))
+        elif self.architecture == "conv1d":
+            channels = (6 if self.projection == "charge_sum" else 3) * self.frames
+            if self.projection == "charge_sum":
+                # Sum bits arrive as (frame, coordinate, bit); convolution
+                # expects (frame, bit, coordinate). Keep the 16-pixel axis
+                # as its spatial dimension, matching the paper's Conv1D.
+                x_input = proj_x.reshape(-1, self.frames, 16, 6).permute(0, 1, 3, 2)
+                y_input = proj_y.reshape(-1, self.frames, 16, 6).permute(0, 1, 3, 2)
+            else:
+                x_input = proj_x.reshape(-1, channels, 16)
+                y_input = proj_y.reshape(-1, channels, 16)
+            x = self.proj_x(x_input.reshape(-1, channels, 16, 1))
+            y = self.proj_y(y_input.reshape(-1, channels, 16, 1))
+            z = torch.cat((x.flatten(1), y.flatten(1)), dim=1)
+        else:
+            raise ValueError("Only projected architectures can use this entry point")
+        return self._readout(z)
+
+    def _readout(self, z):
         z = self.hidden2(self.hidden1(z))
         gates = self.output_gates(z)
         return torch.cat([
