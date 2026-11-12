@@ -1,0 +1,10 @@
+# Separate Python 3.11 environment for the repository's Keras/QKeras baseline.
+# TensorFlow 2.16 + tf-keras 2.16 + QKeras 0.9 passed local model-build,
+# two-epoch training/resume, and evaluation checks with legacy Keras enabled.
+tensorflow[and-cuda]==2.16.1
+tf-keras==2.16.0
+qkeras==0.9.0
+numpy>=1.24,<2
+pandas>=2.0,<3
+pyarrow>=11,<20
+matplotlib>=3.7,<4

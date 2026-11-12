@@ -406,6 +406,103 @@ the Slurm environment for later width studies. Non-default readout widths get
 their own run suffix (`_g96`, for example). First measure this 64-gate pilot's
 physics and hardware size before expanding the width sweep.
 
+### Reference Conv1D baseline on paired prepared data
+
+Before claiming an LNN advantage, train the released `QConv1D_Slim` on the
+**same prepared shards** as the LNN. `reference_baseline.py` imports the
+repository's [QKeras Conv1D Slim model](../two_bit_optimization_helpers/models/conv1d_model_quantized.py)
+directly (2,649 parameters). It also supports the released floating-point
+`Conv1D_Slim`. Both take the existing 2-bit ADC codes in channels-last
+`(16, 16, 2)` order, use NAdam at 0.001, batch size 5,000, the source Slim SSE
+loss, 1,000 epochs, and the best validation checkpoint. Test metrics use the
+same residual sign, degree conversion, and minimum 68% interval as the LNN.
+Each run records the prepared metadata and calibration hashes in
+`manifest.json`, and writes `val` and `test` metrics, predictions, and plots.
+
+Two normalization settings answer different questions:
+
+| Setting | Purpose | Label transform |
+| --- | --- | --- |
+| `centered` | Direct LNN-versus-QKeras comparison on the same examples and normalized targets | Existing `calibration.json` mean and scale |
+| `paper_style` | Closer to the released notebook's training recipe | No centering; divide by the prepared data's per-file 99th-percentile scale |
+
+The public comparison is still **not an exact Figure 4 reproduction**. Our
+training/validation shards come from seeded `3sExtended`, with 473,102 train
+and 118,460 validation clusters, whereas the notebook names separately
+prepared `3src`/`2sc` Parquet directories and the paper describes a 520,000
+cluster training sample. Our ADC thresholds are the transformer's published
+means (247.8, 668.4, 1662.9 electrons); the paper's quantized Conv1D used
+model-specific optimized thresholds. The `paper_style` scale is derived from
+our public prepared data, not the original `3src` validation files. These
+differences should be resolved with the authors' exact prepared files and
+thresholds before presenting a numerical reproduction claim.
+
+Install the baseline in its own environment on Della; keep the TorchLogix
+environment for LNN runs:
+
+```bash
+cd ~/smart-pixels-ml
+git switch wip-mila
+git pull --ff-only origin wip-mila
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+module load anaconda3/2026.7
+conda create --prefix "$DATA/baseline_env" python=3.11 pip -y
+conda activate "$DATA/baseline_env"
+python -m pip install -r lnn_regression/reference_baseline_requirements.txt
+export TF_USE_LEGACY_KERAS=1
+export MPLCONFIGDIR="$DATA/mplconfig"
+mkdir -p "$MPLCONFIGDIR"
+python -c 'import tensorflow as tf, tf_keras, qkeras; print(tf.__version__, tf_keras.__version__, qkeras.__version__)'
+```
+
+Launch both normalization controls:
+
+```bash
+cd ~/smart-pixels-ml
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+module load anaconda3/2026.7
+conda activate "$DATA/baseline_env"
+export TF_USE_LEGACY_KERAS=1
+export MPLCONFIGDIR="$DATA/mplconfig"
+PAIR_JOB=$(sbatch --parsable --time=12:00:00 \
+  --export=ALL,VARIANT=qkeras,LABEL_NORM=centered \
+  lnn_regression/della_reference_baseline.sbatch)
+PAPER_STYLE_JOB=$(sbatch --parsable --time=12:00:00 \
+  --export=ALL,VARIANT=qkeras,LABEL_NORM=paper_style \
+  lnn_regression/della_reference_baseline.sbatch)
+echo "Paired QKeras job: $PAIR_JOB; paper-style normalization job: $PAPER_STYLE_JOB"
+squeue -j "$PAIR_JOB,$PAPER_STYLE_JOB"
+```
+
+The jobs write to `$DATA/runs_centered/reference_conv1d_slim_qkeras_centered`
+and `$DATA/runs_centered/reference_conv1d_slim_qkeras_paper_style`. They fail
+early if TensorFlow cannot see the allocated GPU. If a time limit interrupts
+training, resubmit the same job command; the runner restores the last complete
+epoch, optimizer state, and best checkpoint. Once complete, compare the
+quantized reference and LNN on identical examples:
+
+```bash
+cd ~/smart-pixels-ml
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+module load anaconda3/2026.7
+conda activate "$DATA/env"
+export MPLCONFIGDIR="$DATA/mplconfig"
+BASE="$DATA/runs_centered/reference_conv1d_slim_qkeras_centered"
+LNN="$DATA/runs_centered/conv1d_slim_charge_sum"
+cat "$BASE/test/metrics.json"
+cat "$LNN/test/metrics.json"
+python -m lnn_regression.compare \
+  --metrics "$BASE/test/metrics.json" "$LNN/test/metrics.json" \
+  --out "$DATA/runs_centered/paired_conv1d_qkeras_vs_lnn.png"
+ls -lh "$BASE/test/residuals.png" "$BASE/test/history.png" \
+       "$DATA/runs_centered/paired_conv1d_qkeras_vs_lnn.png"
+```
+
+Physics superiority requires better paired test metrics; a hardware advantage
+requires comparable error with lower measured target resources. The compact
+LNN RTL still excludes its upstream charge-sum projectors, so a gate count
+alone is not a matched eFPGA or ASIC area result.
+
 ## Local smoke check
 
 For a small prepared dataset, first run `python -m lnn_regression.calibrate

@@ -16,8 +16,12 @@ def main():
     p.add_argument("--out", type=Path, required=True)
     args = p.parse_args()
     metrics = [json.loads(path.read_text()) for path in args.metrics]
-    labels = [f"{m['architecture']} {m['task']} {m.get('projection', 'or')}"
-              for m in metrics]
+    labels = []
+    for m in metrics:
+        label = f"{m['architecture']} {m['task']} {m.get('projection', 'or')}"
+        if "variant" in m:
+            label += f" {m['variant']} {m['normalization']}"
+        labels.append(label)
     fig, axes = plt.subplots(1, 4, figsize=(15, max(4, 0.55 * len(metrics) + 2.5)))
     keys = ("x", "y", "cotA", "cotB")
     for ax, key in zip(axes, keys):
