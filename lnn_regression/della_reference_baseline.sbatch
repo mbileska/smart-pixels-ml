@@ -11,9 +11,9 @@ module load anaconda3/2026.7
 DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
 conda activate "$DATA/baseline_env"
 cd "$SLURM_SUBMIT_DIR"
-export TF_USE_LEGACY_KERAS=1
-export MPLCONFIGDIR="$DATA/mplconfig"
-mkdir -p "$MPLCONFIGDIR"
+source lnn_regression/reference_gpu_env.sh
+echo "GPU allocated by Slurm:"
+nvidia-smi -L
 VARIANT=${VARIANT:-qkeras}
 LABEL_NORM=${LABEL_NORM:-centered}
 EPOCHS=${EPOCHS:-1000}

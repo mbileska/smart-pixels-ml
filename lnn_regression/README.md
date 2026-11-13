@@ -455,7 +455,30 @@ mkdir -p "$MPLCONFIGDIR"
 python -c 'import tensorflow as tf, tf_keras, qkeras; print(tf.__version__, tf_keras.__version__, qkeras.__version__)'
 ```
 
-Launch both normalization controls:
+TensorFlow must also see a GPU **inside a Slurm GPU allocation**. The
+`reference_gpu_env.sh` setup prepends the pip-installed NVIDIA library
+directories to `LD_LIBRARY_PATH`, since TensorFlow 2.16 can otherwise report
+`Cannot dlopen some GPU libraries` on Della even when Slurm assigns a GPU.
+Run the short preflight before resubmitting a full baseline:
+
+```bash
+cd ~/smart-pixels-ml
+git pull --ff-only origin wip-mila
+DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression
+module load anaconda3/2026.7
+conda activate "$DATA/baseline_env"
+CHECK=$(sbatch --parsable lnn_regression/della_reference_gpu_check.sbatch)
+echo "GPU preflight job: $CHECK"
+```
+
+After it finishes, check `sacct -j "$CHECK" --format=JobID,State,ExitCode`
+and `tail -n 80 "slurm-$CHECK.out"`. Continue only when the log lists a
+TensorFlow GPU. If it reports zero pip CUDA library directories, inspect the
+installation with `python -m pip show nvidia-cudnn-cu12 nvidia-cublas-cu12`.
+If it still reports no GPU despite installed libraries, keep the preflight
+log for troubleshooting rather than submitting another long training job.
+
+Launch both normalization controls after the GPU preflight succeeds:
 
 ```bash
 cd ~/smart-pixels-ml
