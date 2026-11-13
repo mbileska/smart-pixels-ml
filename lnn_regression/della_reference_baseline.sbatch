@@ -6,6 +6,7 @@
 #SBATCH --mem=32G
 #SBATCH --time=12:00:00
 #SBATCH --gres=gpu:1
+#SBATCH --output=/scratch/gpfs/IOJALVO/mb7126/lnn_regression/conv1d-ref-%j.out
 set -euo pipefail
 module load anaconda3/2026.7
 DATA=/scratch/gpfs/IOJALVO/mb7126/lnn_regression

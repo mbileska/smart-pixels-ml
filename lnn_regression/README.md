@@ -501,7 +501,12 @@ The jobs write to `$DATA/runs_centered/reference_conv1d_slim_qkeras_centered`
 and `$DATA/runs_centered/reference_conv1d_slim_qkeras_paper_style`. They fail
 early if TensorFlow cannot see the allocated GPU. If a time limit interrupts
 training, resubmit the same job command; the runner restores the last complete
-epoch, optimizer state, and best checkpoint. Once complete, compare the
+epoch, optimizer state, and best checkpoint. Slurm logs for these jobs are
+written to `$DATA/conv1d-ref-JOBID.out` on scratch, rather than the submit
+directory in home. Check them with `tail -n 80 "$DATA/conv1d-ref-$PAIR_JOB.out"`
+or the corresponding paper-style job ID. The run has no early stopping: it
+trains all 1,000 epochs and retains the best validation weights for evaluation.
+Once complete, compare the
 quantized reference and LNN on identical examples:
 
 ```bash
